@@ -1,0 +1,5 @@
+# Temporary Mac files
+*.DS_Store
+
+# Jupyter checkpoints
+*.ipynb_checkpoints

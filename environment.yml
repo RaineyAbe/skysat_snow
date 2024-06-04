@@ -1,0 +1,16 @@
+name: snow-dems
+channels:
+- conda-forge
+- pkgs/main
+dependencies:
+- gdal
+- geopandas
+- ipywidgets
+- jupyterlab
+- matplotlib
+- pdal
+- python-pdal
+- rioxarray
+- tqdm
+- xarray
+

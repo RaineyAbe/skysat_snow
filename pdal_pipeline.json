@@ -1,0 +1,14 @@
+{
+    "pipeline": [
+        {
+            "type":"readers.las"
+        },
+        {
+            "gdaldriver":"GTiff",
+            "output_type":"mean,stdev,count",
+            "gdalopts":"COMPRESS=LZW,PREDICTOR=3,TILED=YES",
+            "data_type":"FLOAT32",
+            "type": "writers.gdal"
+        }
+    ]
+}
