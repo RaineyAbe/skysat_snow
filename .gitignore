@@ -3,3 +3,6 @@
 
 # Jupyter checkpoints
 *.ipynb_checkpoints
+
+# PyCharm checkpoints
+.idea*
