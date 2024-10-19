@@ -1,8 +1,6 @@
-# Temporary Mac files
+# Temporar files
 *.DS_Store
-
-# Jupyter checkpoints
 *.ipynb_checkpoints
-
-# PyCharm checkpoints
 .idea*
+*__pychache__
+*.pyc
