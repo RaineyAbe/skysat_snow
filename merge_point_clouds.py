@@ -5,8 +5,8 @@ import shutil
 import subprocess
 
 # -----Define input and output directories
-in_dir = '/bsuhome/raineyaberle/scratch/SkySat-Stereo/study_sites/SitKusa/20220906/proc_out/final_pinhole_stereo'
-out_dir = '/bsuhome/raineyaberle/scratch/SkySat-Stereo/study_sites/SitKusa/20220906/proc_out/point_clouds'
+in_dir = '/bsuhome/raineyaberle/scratch/SkySat-Stereo/study_sites/SitKusa/20240403/proc_out/final_pinhole_stereo'
+out_dir = '/bsuhome/raineyaberle/scratch/SkySat-Stereo/study_sites/SitKusa/20240403/proc_out/point_clouds'
 # Create the output directory if it doesn't exist
 if not os.path.exists(out_dir):
     os.mkdir(out_dir)
