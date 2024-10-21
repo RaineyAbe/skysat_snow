@@ -264,6 +264,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     mosaic = None
     def load_mosaic(multispec_mosaic_fn):
         mosaic_xr = rxr.open_rasterio(multispec_mosaic_fn)
+        cmax = np.nanpercentile(mosaic_xr.data.ravel(), 99)
         crs = f'EPSG:{mosaic_xr.rio.crs.to_epsg()}'
         mosaic = xr.Dataset(coords={'y': mosaic_xr.y, 'x':mosaic_xr.x})
         bands = ['blue', 'green', 'red', 'NIR']
@@ -272,13 +273,13 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
         mosaic = mosaic / 1e4
         mosaic = xr.where(mosaic==0, np.nan, mosaic)
         mosaic.rio.write_crs(crs, inplace=True)
-        return mosaic, crs
+        return mosaic, crs, cmax
 
     # Construct trees mask
     if not os.path.exists(trees_mask_fn):
         print('Constructing trees mask...')
         if not mosaic:
-            mosaic, crs = load_mosaic(multispec_mosaic_fn)
+            mosaic, crs, cmax = load_mosaic(multispec_mosaic_fn)
         # Calculate NDVI
         ndvi = (mosaic.NIR - mosaic.red) / (mosaic.NIR + mosaic.red)
         # Apply threshold
@@ -299,7 +300,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     if not os.path.exists(snow_mask_fn):
         print('Constructing snow mask...')
         if not mosaic:
-            mosaic, crs = load_mosaic(multispec_mosaic_fn)
+            mosaic, crs, cmax = load_mosaic(multispec_mosaic_fn)
         # Calculate NDSI
         ndsi = (mosaic.red - mosaic.NIR) / (mosaic.red + mosaic.NIR)
         # Apply threshold
@@ -320,7 +321,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     if not os.path.exists(roads_mask_fn):
         print('Constructing roads mask...')
         if not mosaic:
-            mosaic, crs = load_mosaic(multispec_mosaic_fn)
+            mosaic, crs, cmax = load_mosaic(multispec_mosaic_fn)
         # Load roads vector file
         roads_vector = gpd.read_file(roads_vector_fn) 
         # Convert to mask
@@ -341,7 +342,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     if not os.path.exists(ss_mask_fn):
         print('Constructing stable surfaces mask...')
         if not mosaic:
-            mosaic, crs = load_mosaic(multispec_mosaic_fn)
+            mosaic, crs, cmax = load_mosaic(multispec_mosaic_fn)
         # Load trees and snow masks
         trees_mask = rxr.open_rasterio(trees_mask_fn).squeeze()
         snow_mask = rxr.open_rasterio(snow_mask_fn).squeeze()
@@ -361,7 +362,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     if plot_results & (not os.path.exists(fig_fn)):
         print('Plotting land cover masks...')
         if not mosaic:
-            mosaic, crs = load_mosaic(multispec_mosaic_fn)
+            mosaic, crs, cmax = load_mosaic(multispec_mosaic_fn)
         # Load masks
         trees_mask = rxr.open_rasterio(trees_mask_fn).squeeze()
         snow_mask = rxr.open_rasterio(snow_mask_fn).squeeze()
@@ -371,7 +372,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
         # Plot
         fig, ax = plt.subplots(1, 2, figsize=(10,5))
         # RGB image
-        ax[0].imshow(np.dstack([mosaic.red.data, mosaic.green.data, mosaic.blue.data]), clim=(0,0.6),
+        ax[0].imshow(np.dstack([mosaic.red.data, mosaic.green.data, mosaic.blue.data]), clim=(0, cmax),
                      extent=(np.min(mosaic.x)/1e3, np.max(mosaic.x)/1e3, np.min(mosaic.y)/1e3, np.max(mosaic.y)/1e3))
         ax[0].set_title('RGB mosaic')
         ax[0].set_xlabel('Easting [km]')
@@ -497,12 +498,13 @@ def align_transform_pc(asp_dir, tba_pc_fn, ref_dem_fn, roads_mask_fn, out_res, o
     # Clip reference DEM to roads mask
     ref_dem_clip_fn = os.path.join(out_align_dir, 'reference_dem_roads.tif')
     if not os.path.exists(ref_dem_clip_fn):
-        ref_dem = rxr.open_rasterio(ref_dem_adj_fn).squeeze()
+        ref_dem = rxr.open_rasterio(ref_dem_fn).squeeze()
         roads_mask = rxr.open_rasterio(roads_mask_fn).squeeze()
         roads_mask = roads_mask.rio.reproject_match(ref_dem)
         with xr.set_options(keep_attrs=True):
             ref_dem_clip = xr.where(roads_mask==1, ref_dem, ref_dem.attrs['_FillValue'])
-        print('Reference DEM clipped to roads saved to file:', out_fn)
+            ref_dem_clip.rio.to_raster(ref_dem_clip_fn)
+        print('Reference DEM clipped to roads saved to file:', ref_dem_clip_fn)
     else:
         print('Reference DEM clipped to roads already exists, skipping.')
 
@@ -546,7 +548,7 @@ def align_transform_pc(asp_dir, tba_pc_fn, ref_dem_fn, roads_mask_fn, out_res, o
     return final_tif_fn
 
 
-def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, out_res, out_dir, vmin=-5, vmax=5, plot_results=True):
+def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, roads_mask_fn, out_res, out_dir, vmin=-5, vmax=5, plot_results=True):
 
     # Define output files
     out_dem_fn = os.path.join(out_dir, 'final_DEM.tif')
@@ -564,44 +566,47 @@ def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, out_res, out_dir, vmi
     ref_dem = ref_dem.reproject(res=out_res)
     dem = xdem.DEM(tba_dem_fn)
     ss_mask = gu.Raster(ss_mask_fn, load_data=True)
+    roads_mask = gu.Raster(roads_mask_fn, load_data=True)
     # Reproject DEM and ss_mask to reference DEM
     dem = dem.reproject(ref_dem)
     ss_mask = ss_mask.reproject(ref_dem)
     ss_mask = (ss_mask==1)
+    roads_mask = roads_mask.reproject(ref_dem)
+    roads_mask = (roads_mask==1)
 
     # Calculate dDEM and stable surface stats before adjustments
     print('Calculating dDEM before adjustments...')
     ddem_before = dem - ref_dem
-    ddem_before_ss = ddem_before[ss_mask]
-    ddem_before_ss_med, ddem_before_ss_nmad = np.median(ddem_before_ss), xdem.spatialstats.nmad(ddem_before_ss)
+    ddem_before_roads = ddem_before[roads_mask]
+    ddem_before_roads_med, ddem_before_roads_nmad = np.median(ddem_before_roads), xdem.spatialstats.nmad(ddem_before_roads)
 
     # Deramp
-    # print('Deramping...')
-    # deramp = xdem.coreg.Deramp(poly_order=2).fit(ref_dem, dem, inlier_mask=ss_mask)
-    # dem_deramped = deramp.apply(dem)
+    print('Deramping using stable surfaces...')
+    deramp = xdem.coreg.Deramp(poly_order=2).fit(ref_dem, dem, inlier_mask=ss_mask)
+    dem_deramp = deramp.apply(dem)
 
     # Coregister
-    print('Coregistering...')
-    coreg = xdem.coreg.NuthKaab().fit(ref_dem, dem, inlier_mask=ss_mask)
+    print('Coregistering using stable surfaces...')
+    coreg = xdem.coreg.NuthKaab().fit(ref_dem, dem_deramp, inlier_mask=ss_mask)
     print('Coregistration fit:\n', coreg.meta)
-    dem_coreg = coreg.apply(dem)
+    dem_deramp_coreg = coreg.apply(dem)
 
     # Calculate differences after adjustments
     print('Calculating dDEM after adjustments...')
-    ddem_after = dem_coreg - ref_dem
-    ddem_after_ss = ddem_after[ss_mask]
-    ddem_after_ss_med, ddem_after_ss_nmad = np.median(ddem_after_ss), xdem.spatialstats.nmad(ddem_after_ss)
+    ddem_after = dem_deramp_coreg - ref_dem
+    ddem_after_roads = ddem_after[roads_mask]
+    ddem_after_roads_med, ddem_after_roads_nmad = np.median(ddem_after_roads), xdem.spatialstats.nmad(ddem_after_roads)
 
     # Subtract the median stable surfaces difference
-    print('Removing median dDEM value over stable surfaces...')
-    dem_coreg -= ddem_after_ss_med
-    ddem_after -= ddem_after_ss_med
+    print('Removing median dDEM value over roads...')
+    dem_deramp_coreg -= ddem_after_roads_med
+    ddem_after -= ddem_after_roads_med
     # Re-calculate stable surface stats
-    ddem_after_ss = ddem_after[ss_mask]
-    ddem_after_ss_med, ddem_after_ss_nmad = np.median(ddem_after_ss), xdem.spatialstats.nmad(ddem_after_ss)
+    ddem_after_roads = ddem_after[roads_mask]
+    ddem_after_roads_med, ddem_after_roads_nmad = np.median(ddem_after_roads), xdem.spatialstats.nmad(ddem_after_roads)
 
     # Save final DEM and dDEM
-    dem_coreg.save(out_dem_fn)
+    dem_deramp_coreg.save(out_dem_fn)
     print('Final DEM saved to file:', out_dem_fn)
     ddem_after.save(out_ddem_fn)
     print('Final dDEM saved to file:', out_ddem_fn)
@@ -614,9 +619,9 @@ def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, out_res, out_dir, vmi
         bins = np.linspace(vmin, vmax, 100)
         ss_color = 'm'
         for i, (ddem, ddem_ss, ddem_ss_med, ddem_ss_nmad) in enumerate(zip([ddem_before, ddem_after], 
-                                                                        [ddem_before_ss, ddem_after_ss],
-                                                                        [ddem_before_ss_med, ddem_after_ss_med], 
-                                                                        [ddem_before_ss_nmad, ddem_after_ss_nmad])):
+                                                                        [ddem_before_roads, ddem_after_roads],
+                                                                        [ddem_before_roads_med, ddem_after_roads_med], 
+                                                                        [ddem_before_roads_nmad, ddem_after_roads_nmad])):
             # Map
             ddem.plot(ax=ax[i], cmap='coolwarm_r', vmin=vmin, vmax=vmax)
             ax[i].set_xticks(ax[i].get_xticks())
@@ -627,10 +632,11 @@ def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, out_res, out_dir, vmi
             # Histogram
             ax[i+2].hist(ddem.data.ravel(), bins=bins, color='k', alpha=0.8, label='All surfaces')
             ax2 = ax[i+2].twinx()
-            ax2.hist(ddem_ss.data.ravel(), bins=bins, color=ss_color, alpha=0.8, label='Stable surfaces')
+            hist = ax2.hist(ddem_ss.data.ravel(), bins=bins, color=ss_color, alpha=0.8, label='Roads')
             ax2.spines['right'].set_color(ss_color)
             ax2.yaxis.label.set_color(ss_color)
             ax2.tick_params(colors=ss_color, which='both')
+            ax2.set_ylim(0, np.nanmax(hist[0])*1.4)
             ax[i+2].set_xlim(vmin, vmax)
             handles1, labels1 = ax[i+2].get_legend_handles_labels()
             handles2, labels2 = ax2.get_legend_handles_labels()
