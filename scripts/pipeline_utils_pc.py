@@ -11,6 +11,7 @@ import matplotlib
 import json
 import subprocess
 import geopandas as gpd
+import pandas as pd
 import xarray as xr
 import rioxarray as rxr
 from shapely import clip_by_rect, unary_union
@@ -21,6 +22,7 @@ import geoutils as gu
 from matplotlib.colors import LightSource
 from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
 import matplotlib.font_manager as fm
+import seaborn as sns
 
 
 def convert_wgs_to_utm(lon: float, lat: float):
@@ -60,7 +62,7 @@ def preprocess_multispec_refdem_roads(multispec_dir, refdem_fn, roads_fn, roads_
             # Grab all 4-band SR image file names
             multispec_fns = sorted(glob.glob(os.path.join(multispec_dir, '*_SR.tif')))
             # Construct gdal_merge command
-            cmd = ['gdal_merge'] + multispec_fns + ['-o', multispec_mosaic_fn]
+            cmd = ['gdal_merge'] + multispec_fns + ['-ps', '2', '2', '-ot', 'Int16', '-o', multispec_mosaic_fn]
             # Run command
             output = subprocess.run(cmd, shell=False, capture_output=True)
             print(output)
@@ -263,8 +265,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     # Function to load 4-band mosaic if needed
     mosaic = None
     def load_mosaic(multispec_mosaic_fn):
-        mosaic_xr = rxr.open_rasterio(multispec_mosaic_fn)
-        cmax = np.nanpercentile(mosaic_xr.data.ravel(), 99)
+        mosaic_xr = rxr.open_rasterio(multispec_mosaic_fn).astype(float)
         crs = f'EPSG:{mosaic_xr.rio.crs.to_epsg()}'
         mosaic = xr.Dataset(coords={'y': mosaic_xr.y, 'x':mosaic_xr.x})
         bands = ['blue', 'green', 'red', 'NIR']
@@ -273,13 +274,13 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
         mosaic = mosaic / 1e4
         mosaic = xr.where(mosaic==0, np.nan, mosaic)
         mosaic.rio.write_crs(crs, inplace=True)
-        return mosaic, crs, cmax
+        return mosaic, crs
 
     # Construct trees mask
     if not os.path.exists(trees_mask_fn):
         print('Constructing trees mask...')
         if not mosaic:
-            mosaic, crs, cmax = load_mosaic(multispec_mosaic_fn)
+            mosaic, crs = load_mosaic(multispec_mosaic_fn)
         # Calculate NDVI
         ndvi = (mosaic.NIR - mosaic.red) / (mosaic.NIR + mosaic.red)
         # Apply threshold
@@ -300,7 +301,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     if not os.path.exists(snow_mask_fn):
         print('Constructing snow mask...')
         if not mosaic:
-            mosaic, crs, cmax = load_mosaic(multispec_mosaic_fn)
+            mosaic, crs = load_mosaic(multispec_mosaic_fn)
         # Calculate NDSI
         ndsi = (mosaic.red - mosaic.NIR) / (mosaic.red + mosaic.NIR)
         # Apply threshold
@@ -321,7 +322,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     if not os.path.exists(roads_mask_fn):
         print('Constructing roads mask...')
         if not mosaic:
-            mosaic, crs, cmax = load_mosaic(multispec_mosaic_fn)
+            mosaic, crs = load_mosaic(multispec_mosaic_fn)
         # Load roads vector file
         roads_vector = gpd.read_file(roads_vector_fn) 
         # Convert to mask
@@ -342,7 +343,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     if not os.path.exists(ss_mask_fn):
         print('Constructing stable surfaces mask...')
         if not mosaic:
-            mosaic, crs, cmax = load_mosaic(multispec_mosaic_fn)
+            mosaic, crs = load_mosaic(multispec_mosaic_fn)
         # Load trees and snow masks
         trees_mask = rxr.open_rasterio(trees_mask_fn).squeeze()
         snow_mask = rxr.open_rasterio(snow_mask_fn).squeeze()
@@ -362,7 +363,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     if plot_results & (not os.path.exists(fig_fn)):
         print('Plotting land cover masks...')
         if not mosaic:
-            mosaic, crs, cmax = load_mosaic(multispec_mosaic_fn)
+            mosaic, crs = load_mosaic(multispec_mosaic_fn)
         # Load masks
         trees_mask = rxr.open_rasterio(trees_mask_fn).squeeze()
         snow_mask = rxr.open_rasterio(snow_mask_fn).squeeze()
@@ -372,7 +373,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
         # Plot
         fig, ax = plt.subplots(1, 2, figsize=(10,5))
         # RGB image
-        ax[0].imshow(np.dstack([mosaic.red.data, mosaic.green.data, mosaic.blue.data]), clim=(0, cmax),
+        ax[0].imshow(np.dstack([mosaic.red.data, mosaic.green.data, mosaic.blue.data]),
                      extent=(np.min(mosaic.x)/1e3, np.max(mosaic.x)/1e3, np.min(mosaic.y)/1e3, np.max(mosaic.y)/1e3))
         ax[0].set_title('RGB mosaic')
         ax[0].set_xlabel('Easting [km]')
@@ -403,6 +404,291 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     return multispec_mosaic_fn, trees_mask_fn, snow_mask_fn, roads_mask_fn, ss_mask_fn
 
     
+def correct_coregister_difference(dem_fn, refdem_fn, ss_mask_fn, roads_mask_fn, out_dir, plot_results=True):
+    # Define output files
+    final_dem_fn = os.path.join(out_dir, 'final_dem.tif')
+    final_ddem_fn = os.path.join(out_dir, 'final_ddem.tif')
+    fig_fn = os.path.join(out_dir, 'correct_coreg_diff_results.png')
+
+    if (not os.path.exists(final_dem_fn)) | (not os.path.exists(final_ddem_fn)):
+        print('Loading input files...')
+        dem = xdem.DEM(dem_fn)
+        refdem = xdem.DEM(refdem_fn).reproject(dem)
+        ss_mask = gu.Raster(ss_mask_fn).reproject(dem)
+        ss_mask = (ss_mask==1)
+        roads_mask = gu.Raster(roads_mask_fn).reproject(dem)
+        roads_mask = (roads_mask==1)
+
+        print('Calculating dDEM before adjustments...')
+        ddem_before = dem - refdem
+        ddem_before_roads = ddem_before[roads_mask]
+        ddem_before_roads_med = np.nanmedian(ddem_before_roads.data)
+        ddem_before_roads_nmad = xdem.spatialstats.nmad(ddem_before_roads)
+
+        def correct_dem(refdem, dem, ss_mask):
+            # ICP
+            print('ICP')
+            icp = xdem.coreg.ICP().fit(refdem, dem, ss_mask)
+            dem_icp = icp.apply(dem)
+            # Deramp
+            print('Deramp')
+            deramp = xdem.coreg.Deramp().fit(refdem, dem_icp, ss_mask)
+            dem_icp_deramp = deramp.apply(dem_icp)
+            print(deramp.meta)
+            # Nuth and Kaab coregistration
+            print('Nuth & Kaab coregistration')
+            nk = xdem.coreg.NuthKaab().fit(refdem, dem_icp_deramp, ss_mask)
+            dem_icp_deramp_nk = nk.apply(dem_icp_deramp)
+            print(nk.meta)
+            return dem_icp_deramp_nk
+
+        print('Correcting DEM...')
+        print('Iteration 1/2....')
+        dem_corr = correct_dem(refdem, dem, ss_mask)
+        print('Iteration 2/2....')
+        dem_corr_corr = correct_dem(refdem, dem_corr, ss_mask)
+
+        print('Calculating difference after bias correction...')
+        ddem_after = dem_corr_corr - refdem
+        ddem_after_roads = ddem_after[roads_mask]
+        ddem_after_roads_med = np.nanmedian(ddem_after_roads.data)
+        ddem_after_roads_nmad = xdem.spatialstats.nmad(ddem_after_roads)
+
+        print('Applying vertical correction using median dDEM value at roads...')
+        ddem_after = ddem_after - ddem_after_roads_med
+        final_dem = dem_corr_corr - ddem_after_roads_med
+        ddem_after_roads_med = 0
+
+        # Save results to file
+        final_dem.save(final_dem_fn)
+        print('Final DEM saved to file:', final_dem_fn)
+        ddem_after.save(final_ddem_fn)
+        print('Final dDEM saved to file:', final_ddem_fn)
+    
+    else:
+        print('Final DEM and dDEM already exist, skipping.')
+        return final_dem_fn, final_ddem_fn
+
+    if plot_results:
+        print('Plotting results...')
+        vmin, vmax = -10, 10
+        fig, ax = plt.subplots(2, 2, figsize=(10,8), gridspec_kw=dict(height_ratios=[2,1]))
+        ax = ax.flatten()
+        bins = np.linspace(vmin, vmax, 100)
+        ss_color = 'm'
+        for i, (ddem, ddem_roads, ddem_roads_med, ddem_roads_nmad) in enumerate(zip([ddem_before, ddem_after], 
+                                                                                    [ddem_before_roads, ddem_after_roads],
+                                                                                    [ddem_before_roads_med, ddem_after_roads_med], 
+                                                                                    [ddem_before_roads_nmad, ddem_after_roads_nmad])):
+            # Map
+            ddem.plot(ax=ax[i], cmap='coolwarm_r', vmin=vmin, vmax=vmax)
+            ax[i].set_xticks(ax[i].get_xticks())
+            ax[i].set_xticklabels(np.divide(ax[i].get_xticks(), 1e3).astype(str))
+            ax[i].set_yticks(ax[i].get_yticks())
+            ax[i].set_yticklabels(np.divide(ax[i].get_yticks(), 1e3).astype(str))
+            ax[i].set_xlabel('Easting [km]')
+            # Histogram
+            ax[i+2].hist(ddem.data.ravel(), bins=bins, color='k', alpha=0.8, label='All surfaces')
+            ax2 = ax[i+2].twinx()
+            hist = ax2.hist(ddem_roads.data.ravel(), bins=bins, color=ss_color, alpha=0.8, label='Roads')
+            ax2.spines['right'].set_color(ss_color)
+            ax2.yaxis.label.set_color(ss_color)
+            ax2.tick_params(colors=ss_color, which='both')
+            ax2.set_ylim(0, np.nanmax(hist[0])*1.4)
+            ax[i+2].set_xlim(vmin, vmax)
+            handles1, labels1 = ax[i+2].get_legend_handles_labels()
+            handles2, labels2 = ax2.get_legend_handles_labels()
+            handles, labels = handles1+handles2, labels1+labels2
+            ax[i+2].legend(handles, labels, loc='best')
+            ax[i+2].set_title(f'SS median = {np.round(ddem_roads_med, 3)} m\nSS MAD = {np.round(ddem_roads_nmad, 3)} m')
+        # Add some labels
+        ax[0].set_ylabel('Northing [km]')
+        ax[0].set_title('dDEM')
+        ax[1].set_title('dDEM adjusted')
+        ax[2].set_ylabel('Counts')
+        ax2.set_ylabel('Counts', color=ss_color)
+        fig.tight_layout()
+        # Save figure
+        fig.savefig(fig_fn, dpi=300, bbox_inches='tight')
+        print('Figure saved to file:', fig_fn)
+        plt.close()
+
+    return final_dem_fn, final_ddem_fn
+
+
+def plot_dem_ddem(dem_fn, ddem_fn, ss_mask_fn, out_fn, vmin=-5, vmax=5):
+    # Load input files
+    dem = xdem.DEM(dem_fn)
+    ddem = xdem.DEM(ddem_fn)
+    ss_mask = gu.Raster(ss_mask_fn)
+
+    # Drop empty columns (to minimize white space on figure)
+    def drop_empty_cols(raster):
+        mask = raster.data.mask
+        # Identify rows and columns that are completely NaN
+        valid_rows = ~np.all(mask, axis=1)  # All-NaN rows
+        valid_cols = ~np.all(mask, axis=0)  # All-NaN columns
+        # Crop the data to remove empty rows and columns
+        cropped_data = raster.data[valid_rows, :][:, valid_cols]
+        # Create a new Raster object with the cropped data (keeping original metadata)
+        cropped_raster = gu.Raster.from_array(cropped_data, transform=raster.transform, crs=raster.crs)
+        return cropped_raster
+    dem = drop_empty_cols(dem)
+    ddem = drop_empty_cols(ddem)
+
+    # Mask dDEM with stable surfaces
+    ss_mask = ss_mask.reproject(ddem)
+    ss_mask = (ss_mask==1)
+    ddem_ss = ddem[ss_mask]
+
+    # Plot
+    fig, ax = plt.subplots(1, 3, figsize=(12,5))
+    # Shaded relief
+    ls = LightSource(azdeg=315, altdeg=45)
+    hs = ls.hillshade(dem.data, vert_exag=5, dx=10, dy=10)
+    ax[0].imshow(hs, cmap='Greys_r',
+                 extent=(dem.bounds.left, dem.bounds.right, dem.bounds.bottom, dem.bounds.top))
+    im = ax[0].imshow(dem.data, cmap='terrain', alpha=0.7,
+                      extent=(dem.bounds.left, dem.bounds.right, dem.bounds.bottom, dem.bounds.top))
+    fig.colorbar(im, ax=ax[0], orientation='horizontal', shrink=0.8, label='Elevation [m]')
+    ax[0].set_title('DEM shaded relief')
+    # dDEM
+    im = ax[1].imshow(ddem.data, cmap='coolwarm_r', vmin=-5, vmax=5,
+                    extent=(ddem.bounds.left, ddem.bounds.right, ddem.bounds.bottom, ddem.bounds.top))
+    fig.colorbar(im, ax=ax[1], orientation='horizontal', shrink=0.8, label='Difference [m]')
+    ax[1].set_title('dDEM')
+    # dDEM histograms
+    ss_color = 'm'
+    bins = np.linspace(vmin, vmax, 100)
+    ax[2].hist(ddem.data.ravel(), bins=bins, color='gray', alpha=0.9, label='All surfaces')
+    ax[2].set_ylabel('Counts')
+    ax2 = ax[2].twinx()
+    hist = ax2.hist(ddem_ss.data.ravel(), bins=bins, color=ss_color, alpha=0.9, label='Stable surfaces')
+    ax2.set_ylim(0, np.nanmax(hist[0])*1.4)
+    ax2.spines['right'].set_color(ss_color)
+    ax2.yaxis.label.set_color(ss_color)
+    ax2.tick_params(colors=ss_color, which='both')
+    # Add legend
+    handles1, labels1 = ax[2].get_legend_handles_labels()
+    handles2, labels2 = ax2.get_legend_handles_labels()
+    handles, labels = handles1+handles2, labels1+labels2
+    ax[2].legend(handles, labels, loc='best')
+    ax[2].set_xlim(vmin, vmax)
+    # Add scalebars, remove axes
+    for axis in ax[0:-1]:
+        scalebar = AnchoredSizeBar(axis.transData,
+                                1e3, '1 km', 'lower left', 
+                                pad=0.1,
+                                color='k',
+                                frameon=False,
+                                size_vertical=1,
+                                fontproperties=fm.FontProperties(size=14))
+        axis.add_artist(scalebar)
+        axis.set_xticks([])
+        axis.set_yticks([])
+
+    fig.tight_layout()
+
+    # Save figure
+    fig.savefig(out_fn, dpi=300, bbox_inches='tight')
+    print('Figure saved to file:', out_fn)
+    plt.close()
+
+    return
+
+
+def analyze_ddem(ddem_fn, refdem_fn, roads_mask_fn, snow_mask_fn, ss_mask_fn, trees_mask_fn, out_dir, vmin=-5, vmax=5):
+    # Define output files
+    land_cover_fig = os.path.join(out_dir, 'ddem_vs_land_cover_types.png')
+    terrain_fig = os.path.join(out_dir, 'ddem_vs_terrain_parameters.png')
+
+    # Load final dDEM and reference DEM
+    print('Loading input files...')
+    ddem = xdem.DEM(ddem_fn)
+    refdem = xdem.DEM(refdem_fn)
+    refdem = refdem.reproject(ddem)
+
+    ##### dDEM VS. LAND COVER TYPE #####
+    plt.rcParams.update({'font.sans-serif': 'Arial', 'font.size': 12})
+    if not os.path.exists(land_cover_fig):
+        print('Plotting dDEM vs. land cover types...')
+        # Load land cover masks
+        roads_mask = gu.Raster(roads_mask_fn, load_data=True)
+        roads_mask = roads_mask.reproject(ddem)
+        snow_mask = gu.Raster(snow_mask_fn, load_data=True)
+        snow_mask = snow_mask.reproject(ddem)
+        ss_mask = gu.Raster(ss_mask_fn, load_data=True)
+        ss_mask = ss_mask.reproject(ddem)
+        trees_mask = gu.Raster(trees_mask_fn, load_data=True)
+        trees_mask = trees_mask.reproject(ddem)
+        # Create dataframe
+        df = pd.DataFrame({'dDEM': ddem.data.ravel(),
+                           'roads_mask': roads_mask.data.ravel(),
+                           'snow_mask': snow_mask.data.ravel(),
+                           'ss_mask': ss_mask.data.ravel(),
+                           'trees_mask': trees_mask.data.ravel()})
+        df.dropna(inplace=True)
+        # Plot histogram
+        bins = np.linspace(vmin, vmax, 200)
+        cols = ['snow_mask', 'ss_mask', 'trees_mask', 'roads_mask'] 
+        colors = [(55/255, 126/255, 184/255, 1), # snow
+                (153/255, 153/255, 153/255, 1), # stable surfaces
+                (77/255, 175/255, 74/255, 1), # trees
+                (166/255, 86/255, 40/255, 1)] # roads
+        fig, ax = plt.subplots(2, 2, figsize=(10,5))
+        ax = ax.flatten()
+        for i, (col, color) in enumerate(zip(cols, colors)):
+            df_sub = df.loc[df[col]==1, 'dDEM']
+            ax[i].hist(df_sub.values, bins=bins, color=color, alpha=0.8, label=col)
+            ax[i].set_xlim(vmin, vmax)
+            ax[i].set_title(col.replace('ss_mask', 'stable surfaces').replace('_mask', ''))
+        fig.tight_layout()
+        # Save figure
+        fig.savefig(land_cover_fig, dpi=300, bbox_inches='tight')
+        print('Land cover figure saved to file:', land_cover_fig)
+        plt.close()
+        
+    else:
+        print('Land cover figure already exists, skipping.')
+
+    ##### dDEM vs. terrain parameters #####
+    if not os.path.exists(terrain_fig):
+        # Calculate terrain parameters from reference DEM
+        slope = refdem.slope()
+        aspect = refdem.aspect()
+        # Compile all stats into dataframe
+        terrain_cols = ['elevation', 'slope', 'aspect']
+        stats_df = pd.DataFrame(columns=terrain_cols + ['dDEM'])
+        for raster, col in zip([refdem, slope, aspect], terrain_cols):
+            stats_df[col] = raster.data.ravel()
+            # Create bins for column
+            stats_df[col + '_bin'] = pd.cut(stats_df[col], bins=25, precision=0)
+        stats_df['dDEM'] = ddem.data.ravel() 
+        stats_df.dropna(inplace=True)
+        stats_df.reset_index(drop=True, inplace=True)
+    
+        # Plot
+        fig, ax = plt.subplots(1,3, figsize=(16,6))
+        for i, col in enumerate(terrain_cols):
+            sns.boxplot(stats_df, x=col + '_bin', y='dDEM', showfliers=False, ax=ax[i])
+            ax[i].set_title(col)
+            if i==0:
+                ax[i].set_ylabel('dDEM [m]')
+            ax[i].set_xlabel(col)
+            ax[i].set_xticklabels(ax[i].get_xticklabels(), rotation=90)
+            ax[i].axhline(0, color='k')
+        fig.tight_layout()
+        # Save figure
+        fig.savefig(terrain_fig, dpi=300, bbox_inches='tight')
+        print('Terrain figure saved to file:', terrain_fig)
+        plt.close()
+        
+    else:
+        print('Terrain figure already exists, skipping.')
+    
+    return
+
+
 def deramp(ref_dem_fn, tba_dem_fn, tba_pc_fn, out_dir, vmin=-10, vmax=10, plot_results=True):
     # Define output file names
     dem_deramped_fn = os.path.join(out_dir, os.path.basename(tba_dem_fn).replace('.tif', '_deramped.tif'))
@@ -547,7 +833,6 @@ def align_transform_pc(asp_dir, tba_pc_fn, ref_dem_fn, roads_mask_fn, out_res, o
 
     return final_tif_fn
 
-
 def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, roads_mask_fn, out_res, out_dir, vmin=-5, vmax=5, plot_results=True):
 
     # Define output files
@@ -656,83 +941,3 @@ def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, roads_mask_fn, out_re
         print('Figure saved to file:', fig_fn)
 
     return out_dem_fn, out_ddem_fn
-
-def plot_dem_ddem(dem_fn, ddem_fn, ss_mask_fn, out_fn, vmin=-5, vmax=5):
-    # Load input files
-    dem = xdem.DEM(dem_fn)
-    ddem = xdem.DEM(ddem_fn)
-    ss_mask = gu.Raster(ss_mask_fn)
-
-    # Drop empty columns (to minimize white space on figure)
-    def drop_empty_cols(raster):
-        mask = raster.data.mask
-        # Identify rows and columns that are completely NaN
-        valid_rows = ~np.all(mask, axis=1)  # All-NaN rows
-        valid_cols = ~np.all(mask, axis=0)  # All-NaN columns
-        # Crop the data to remove empty rows and columns
-        cropped_data = raster.data[valid_rows, :][:, valid_cols]
-        # Create a new Raster object with the cropped data (keeping original metadata)
-        cropped_raster = gu.Raster.from_array(cropped_data, transform=raster.transform, crs=raster.crs)
-        return cropped_raster
-    dem = drop_empty_cols(dem)
-    ddem = drop_empty_cols(ddem)
-
-    # Mask dDEM with stable surfaces
-    ss_mask = ss_mask.reproject(ddem)
-    ss_mask = (ss_mask==1)
-    ddem_ss = ddem[ss_mask]
-
-    # Plot
-    fig, ax = plt.subplots(1, 3, figsize=(12,5))
-    # Shaded relief
-    ls = LightSource(azdeg=315, altdeg=45)
-    hs = ls.hillshade(dem.data, vert_exag=5, dx=10, dy=10)
-    ax[0].imshow(hs, cmap='Greys_r',
-                 extent=(dem.bounds.left, dem.bounds.right, dem.bounds.bottom, dem.bounds.top))
-    im = ax[0].imshow(dem.data, cmap='terrain', alpha=0.7,
-                      extent=(dem.bounds.left, dem.bounds.right, dem.bounds.bottom, dem.bounds.top))
-    fig.colorbar(im, ax=ax[0], orientation='horizontal', shrink=0.8, label='Elevation [m]')
-    ax[0].set_title('DEM shaded relief')
-    # dDEM
-    im = ax[1].imshow(ddem.data, cmap='coolwarm_r', vmin=-5, vmax=5,
-                    extent=(ddem.bounds.left, ddem.bounds.right, ddem.bounds.bottom, ddem.bounds.top))
-    fig.colorbar(im, ax=ax[1], orientation='horizontal', shrink=0.8, label='Difference [m]')
-    ax[1].set_title('dDEM')
-    # dDEM histograms
-    ss_color = 'm'
-    bins = np.linspace(vmin, vmax, 100)
-    ax[2].hist(ddem.data.ravel(), bins=bins, color='gray', alpha=0.9, label='All surfaces')
-    ax[2].set_ylabel('Counts')
-    ax2 = ax[2].twinx()
-    hist = ax2.hist(ddem_ss.data.ravel(), bins=bins, color=ss_color, alpha=0.9, label='Stable surfaces')
-    ax2.set_ylim(0, np.nanmax(hist[0])*1.4)
-    ax2.spines['right'].set_color(ss_color)
-    ax2.yaxis.label.set_color(ss_color)
-    ax2.tick_params(colors=ss_color, which='both')
-    # Add legend
-    handles1, labels1 = ax[2].get_legend_handles_labels()
-    handles2, labels2 = ax2.get_legend_handles_labels()
-    handles, labels = handles1+handles2, labels1+labels2
-    ax[2].legend(handles, labels, loc='best')
-    ax[2].set_xlim(vmin, vmax)
-    # Add scalebars, remove axes
-    for axis in ax[0:-1]:
-        scalebar = AnchoredSizeBar(axis.transData,
-                                1e3, '1 km', 'lower left', 
-                                pad=0.1,
-                                color='k',
-                                frameon=False,
-                                size_vertical=1,
-                                fontproperties=fm.FontProperties(size=14))
-        axis.add_artist(scalebar)
-        axis.set_xticks([])
-        axis.set_yticks([])
-
-    fig.tight_layout()
-
-    # Save figure
-    fig.savefig(out_fn, dpi=300, bbox_inches='tight')
-    print('Figure saved to file:', out_fn)
-    plt.close()
-
-    return
