@@ -404,7 +404,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     return multispec_mosaic_fn, trees_mask_fn, snow_mask_fn, roads_mask_fn, ss_mask_fn
 
     
-def correct_coregister_difference(dem_fn, refdem_fn, ss_mask_fn, roads_mask_fn, out_dir, plot_results=True):
+def correct_coregister_difference(dem_fn, refdem_fn, ss_mask_fn, roads_mask_fn, trees_mask_fn, out_dir, plot_results=True):
     # Define output files
     final_dem_fn = os.path.join(out_dir, 'final_dem.tif')
     final_ddem_fn = os.path.join(out_dir, 'final_ddem.tif')
@@ -447,6 +447,13 @@ def correct_coregister_difference(dem_fn, refdem_fn, ss_mask_fn, roads_mask_fn, 
         dem_corr = correct_dem(refdem, dem, ss_mask)
         print('Iteration 2/2....')
         dem_corr_corr = correct_dem(refdem, dem_corr, ss_mask)
+
+        print('Masking trees in corrected DEM...')
+        trees_mask = gu.Raster(trees_mask_fn, load_data=True).reproject(dem_corr_corr)
+        trees_mask = (trees_mask==1)
+        # Apply the mask to the DEM without losing the original mask
+        dem_corr_corr.data = np.ma.array(dem_corr_corr.data, 
+                                         mask=(dem_corr_corr.data.mask | trees_mask))
 
         print('Calculating difference after bias correction...')
         ddem_after = dem_corr_corr - refdem
