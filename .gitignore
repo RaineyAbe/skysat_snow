@@ -1,6 +1,9 @@
-# Temporar files
+# Temporary files
 *.DS_Store
 *.ipynb_checkpoints
 .idea*
 *__pychache__
 *.pyc
+
+# Figures
+figures/*
