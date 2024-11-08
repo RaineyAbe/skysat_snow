@@ -408,9 +408,12 @@ def correct_coregister_difference(dem_fn, ref_dem_fn, ss_mask_fn, trees_mask_fn,
     # Define output files
     final_dem_fn = os.path.join(out_dir, 'final_dem.tif')
     final_ddem_fn = os.path.join(out_dir, 'final_ddem.tif')
-    deramp_meta_fn = os.path.join(out_dir, 'fit_deramp.json')
-    icp_meta_fn = os.path.join(out_dir, 'fit_icp.json')
-    vert_meta_fn = os.path.join(out_dir, 'fit_vertical_adjustment.json')
+    deramp_meta_fn = os.path.join(out_dir, 'fit1_deramp.json')
+    deramp_diff_fn = os.path.join(out_dir, 'fit1_deramp_difference.tif')
+    tilt_meta_fn = os.path.join(out_dir, 'fit2_tilt.json')
+    tilt_diff_fn = os.path.join(out_dir, 'fit2_tilt_difference.tif')
+    nk_meta_fn = os.path.join(out_dir, 'fit3_NuthKaab.json')
+    vert_meta_fn = os.path.join(out_dir, 'fit4_vertical_adjustment.json')
 
     print('Loading input files...')
     dem = xdem.DEM(dem_fn)
@@ -441,9 +444,10 @@ def correct_coregister_difference(dem_fn, ref_dem_fn, ss_mask_fn, trees_mask_fn,
         return
     
     def save_fit_to_json(meta, meta_fn):
-        meta_str = {key: str(value) for key, value in meta.items()}
+        for key in meta.keys():
+            meta[key] = [meta[key]]
         with open(meta_fn, "w") as out_file:
-            json.dump(meta_str, out_file)
+            json.dump(meta, out_file)
             print('Fit metadata saved to file:', deramp_meta_fn)
         return
 
@@ -454,57 +458,75 @@ def correct_coregister_difference(dem_fn, ref_dem_fn, ss_mask_fn, trees_mask_fn,
         plot_ddem(ddem_before, gcp_mask)
 
     # Deramp
-    print('Deramping...')
-    deramp = xdem.coreg.Deramp().fit(refdem, dem)
+    print('Deramp')
+    deramp = xdem.coreg.Deramp().fit(refdem, dem, ss_mask)
     dem_deramp = deramp.apply(dem)
-    # Save fit to file
-    save_fit_to_json(deramp.meta, deramp_meta_fn)
-    # re-calculate dDEM
     ddem_deramp = dem_deramp - refdem
-    # Plot new dDEM
+    # save the difference between the DEM and the deramped DEM
+    deramp_diff = dem - dem_deramp
+    deramp_diff.save(deramp_diff_fn)
+    print('Difference saved to file:', deramp_diff_fn)
+    # save metadata to file
+    meta = deramp.meta
+    meta['fit_func'] = 'polynomial_2d'
+    meta['fit_optimizer'] = 'curve_fit'
+    meta['bias_var_names'] = ["xx", "yy"]   
+    meta['fit_perr'] = list(meta['fit_perr'])
+    meta['fit_params'] = list(meta['fit_params']) 
+    save_fit_to_json(meta, deramp_meta_fn)
+    # plot new dDEM
     if plot_results:
         plot_ddem(ddem_deramp, gcp_mask)
-
-    # Mask very high dDEM values
-    print('Masking pixels where abs(dDEM) >= 20 m')
-    ddem_deramp.data[np.abs(ddem_deramp.data) >= 20] = np.nan
-    dem_deramp.data[np.abs(ddem_deramp.data) >= 20] = np.nan
-
-    # ICP
-    print('ICP...')
-    icp = xdem.coreg.ICP().fit(refdem, dem_deramp)
-    dem_deramp_icp = icp.apply(dem_deramp)
-    # Save fit to file
-    save_fit_to_json(icp.meta, icp_meta_fn)
-    # re-calculate dDEM
-    ddem_deramp_icp = dem_deramp_icp - refdem
-    # Plot new dDEM
+    
+    # Tilt
+    print('Tilt correction')
+    tilt = xdem.coreg.Tilt().fit(refdem, dem_deramp, ss_mask)
+    dem_deramp_tilt = tilt.apply(dem_deramp)
+    ddem_deramp_tilt = dem_deramp_tilt - refdem
+    # save the difference between the DEM and the de-tilted DEM
+    tilt_diff = dem_deramp - dem_deramp_tilt
+    tilt_diff.save(tilt_diff_fn)
+    print('Difference saved to file:', tilt_diff_fn)
+    # save metadata to file
+    meta = tilt.meta
+    meta['fit_params'] = list(meta['fit_params'])
+    meta['fit_func'] = 'deramping'
+    save_fit_to_json(meta, tilt_meta_fn)
+    # plot new dDEM
     if plot_results:
-        plot_ddem(ddem_deramp_icp, gcp_mask)
-
-    # Remove median difference over gcp
-    ddem_deramp_icp_gcp = ddem_deramp_icp.copy()
-    ddem_deramp_icp_gcp.set_mask(~gcp_mask)
-    ddem_deramp_icp_gcp_med = np.nanmedian(ddem_deramp_icp_gcp)
-    ddem_deramp_icp_gcp_nmad = xdem.spatialstats.nmad(ddem_deramp_icp_gcp)
-    print(f"GCP Median = {np.round(ddem_deramp_icp_gcp_med, 3)}")
-    print(f"GCP NMAD = {np.round(ddem_deramp_icp_gcp_nmad, 3)}")
-    vert_adjust = ddem_deramp_icp_gcp_med - gcp_elev
-    print(f'Vertical adjustment = {vert_adjust}')
+        plot_ddem(ddem_deramp_tilt, gcp_mask)    
+    
+    # Nuth Kaab
+    print('Nuth and Kaab')
+    nk = xdem.coreg.NuthKaab().fit(refdem, dem_deramp_tilt, ss_mask)
+    dem_deramp_tilt_nk = nk.apply(dem_deramp_tilt)
+    ddem_deramp_tilt_nk = dem_deramp_tilt_nk - refdem
+    # save metadata to file
+    save_fit_to_json(nk.meta, nk_meta_fn)
+    # plot new dDEM
+    if plot_results:
+        plot_ddem(ddem_deramp_tilt_nk, gcp_mask)  
+    
+    # Vertical adjustjustment
+    print('Vertical adjustment')
+    ddem_gcp_med = np.nanmedian(ddem_deramp_tilt_nk[gcp_mask].data)
+    ddem_gcp_nmad = xdem.spatialstats.nmad(ddem_deramp_tilt_nk[gcp_mask])
+    vert_adjust = gcp_elev - ddem_gcp_med
+    dem_deramp_tilt_nk_vert = dem_deramp_tilt_nk + vert_adjust
+    ddem_deramp_tilt_nk_vert = dem_deramp_tilt_nk_vert - refdem
     # save json of verticaladjustment
     vert_meta = {'dDEM_GCP_vert_adj': str(vert_adjust),
-                 'dDEM_GCP_NMAD': str(ddem_deramp_icp_gcp_nmad)}
+                 'dDEM_GCP_NMAD': str(ddem_gcp_nmad)}
     save_fit_to_json(vert_meta, vert_meta_fn)
-    # Calculate final DEM and dDEM
-    final_dem = dem_deramp_icp - vert_adjust
-    final_ddem = ddem_deramp_icp - vert_adjust
-    # Plot dDEM
+    # plot new dDEM
     if plot_results:
-        plot_ddem(final_ddem, gcp_mask)
+        plot_ddem(ddem_deramp_tilt_nk_vert, gcp_mask)
 
     # Save results to file
+    final_dem = dem_deramp_tilt_nk_vert
     final_dem.save(final_dem_fn)
     print('DEM saved to file:', final_dem_fn)
+    final_ddem = ddem_deramp_tilt_nk_vert
     final_ddem.save(final_ddem_fn)
     print('dDEM saved to file:', final_ddem_fn)
 
