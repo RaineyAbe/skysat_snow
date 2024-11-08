@@ -132,6 +132,8 @@ def main():
         shutil.copy2(ortho_dem,os.path.join(refdem_dir,os.path.basename(ortho_dem)))
     else:
         diff_dem = False
+
+
     # replace old variable names
     coreg_dem = os.path.join(refdem_dir,os.path.basename(coreg_dem))
     ortho_dem = os.path.join(refdem_dir,os.path.basename(ortho_dem))
@@ -156,6 +158,7 @@ def main():
         gdf_proj = gdf.to_crs(epsg_code)
         gdf_proj['geometry'] = gdf_proj.buffer(1000)
         gdf_proj.to_file(bound_buffer_fn, driver='GPKG')
+
 
     print("Cropping reference DEMs to extent of SkySat footprint + 1 km buffer")
     misc.clip_raster_by_shp_disk(coreg_dem, bound_buffer_fn)
@@ -241,7 +244,7 @@ def main():
         else:
             no_cam_list += img_fn
     # update image list
-    cam_list = glob.glob(os.path.join(ba_cam_fn, 'run-run-*_rpc.tsai'))
+    cam_list = glob.glob(os.path.join(init_ba, 'run-run-*_rpc.tsai'))
     img_list = [os.path.join(img_folder, os.path.basename(cam_list[i]).replace('_rpc.tsai', '.tif')) for i in range(len(cam_list))]
     # print camera adjustments
     print(f'Using old cameras for {len(old_cam_list)} images')
@@ -292,7 +295,7 @@ def main():
         # now perform alignment
         median_mos_dem = glob.glob(os.path.join(mos_dem_dir, '*_median_mos.tif'))[0]
         print("Aligning DEMs")
-        workflow.alignment_wrapper_single(coreg_dem, source_dem=median_mos_dem, max_displacement=40, outprefix=os.path.join(alignment_dir, 'run'))
+        workflow.alignment_wrapper_single(coreg_dem, source_dem=median_mos_dem, max_displacement=100, outprefix=os.path.join(alignment_dir, 'run'))
 
 
     if 8 in steps2run:

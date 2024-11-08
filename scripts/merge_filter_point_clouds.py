@@ -101,11 +101,12 @@ def plot_dem_comparison(pc_merged_tif_fn, pc_filtered_tif_fn, fig_fn):
         ax[i].set_title(title)
         ax[i].set_xlabel('Easting [km]')
     ax[0].set_ylabel('Northing [km]')
-    plt.show()
     fig.savefig(fig_fn, dpi=300, bbox_inches='tight')
     print(f'Figure saved to file: {fig_fn}')
+    plt.close()
 
 def main():
+    # Get user arguments
     parser = get_parser()
     args = parser.parse_args()
     in_dir = args.in_dir
@@ -113,18 +114,20 @@ def main():
     refdem_fn = args.refdem_fn
     job_name = args.job_name
 
+    # Define output file names
     pc_merged_las_fn = os.path.join(out_dir, f"{job_name}_pc_merged.laz")
-    pc_merged_tif_fn = pc_merged_las_fn.replace('.laz', '.tif')
+    pc_merged_tif_fn = os.path.join(out_dir, f"{job_name}_pc_merged.tif")
     pc_filtered_las_fn = os.path.join(out_dir, f"{job_name}_pc_merged_filtered.laz")
-    pc_filtered_tif_fn = pc_filtered_las_fn.replace('.laz', '.tif')
+    pc_filtered_tif_fn = os.path.join(out_dir, f"{job_name}_pc_merged_filtered.tif")
     json1_fn = os.path.join(out_dir, 'las2tif.json')
     json2_fn = os.path.join(out_dir, 'las2unaligned.json')
-    fig_fn = pc_filtered_las_fn.replace('.laz', '.png')
+    fig_fn = os.path.join(out_dir, f"{job_name}_pc_merged_filtered.png")
     out_res = 2  # m
 
+    # Make the output directory if it doesn't exist
     os.makedirs(out_dir, exist_ok=True)
-    print(f'Made directory for output point clouds: {out_dir}')
 
+    # Merge point clouds
     if not os.path.exists(pc_merged_las_fn):
         construct_point_clouds(in_dir, out_dir)
         print('Merging point clouds...')
@@ -132,18 +135,21 @@ def main():
     else:
         print('Merged point cloud already exists, skipping.')
 
+    # Rasterize the initial point cloud
     if not os.path.exists(pc_merged_tif_fn):
         print('Rasterizing initial point cloud for reference...')
         rasterize_point_cloud(pc_merged_las_fn, pc_merged_tif_fn, out_res, json1_fn)
     else:
         print('Rasterized point cloud already exists, skipping.')
 
+    # Filter the point cloud
     if not os.path.exists(pc_filtered_las_fn):
         print('Filtering point cloud...')
         filter_point_cloud(pc_merged_las_fn, pc_filtered_las_fn, pc_filtered_tif_fn, refdem_fn, out_res, json2_fn)
     else:
         print('Filtered point cloud already exists, skipping.')
 
+    # Plot results
     if not os.path.exists(fig_fn):
         print('Plotting DEM pre- and post-filtering...')
         plot_dem_comparison(pc_merged_tif_fn, pc_filtered_tif_fn, fig_fn)

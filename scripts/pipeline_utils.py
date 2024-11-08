@@ -51,7 +51,7 @@ def convert_wgs_to_utm(lon: float, lat: float):
     return f'EPSG:{epsg_code}'
 
 
-def preprocess_multispec_refdem_roads(multispec_dir, refdem_fn, roads_fn, roads_buffer, out_res, out_dir):    
+def preprocess_multispec_refdem_gcp(multispec_dir, refdem_fn, gcp_fn, gcp_buffer, out_dir):    
 
     # Check if multispec_dir is a directory of images or a single file
     if os.path.isdir(multispec_dir):
@@ -83,19 +83,19 @@ def preprocess_multispec_refdem_roads(multispec_dir, refdem_fn, roads_fn, roads_
     bounds = multispec_mosaic.rio.bounds()
     bounds_buffered = [bounds[0]-1e3, bounds[1]-1e3, bounds[2]+1e3, bounds[3]+1e3]
     
-    # Roads: buffer and crop to extent
-    roads_adj_fn = os.path.join(out_dir, f"roads_buffered_cropped_{crs_utm.replace(':', '')}.gpkg")
-    if not os.path.exists(roads_adj_fn):
-        print('Merging, buffering, and cropping roads...')
-        roads = gpd.read_file(roads_fn)
-        roads = roads.to_crs(crs_utm)
-        geom = unary_union(roads['geometry'].values).buffer(roads_buffer)
+    # GCP: buffer and crop to extent
+    gcp_adj_fn = os.path.join(out_dir, f"GCP_buffered_cropped_{crs_utm.replace(':', '')}.gpkg")
+    if not os.path.exists(gcp_adj_fn):
+        print('Merging, buffering, and cropping GCP...')
+        gcp = gpd.read_file(gcp_fn)
+        gcp = gcp.to_crs(crs_utm)
+        geom = unary_union(gcp['geometry'].values).buffer(gcp_buffer)
         geom_crop = clip_by_rect(geom, bounds_buffered[0], bounds_buffered[1], bounds_buffered[2], bounds_buffered[3])
-        roads_adj = gpd.GeoDataFrame(geometry=[geom_crop], crs=crs_utm)
-        roads_adj.to_file(roads_adj_fn)
-        print('Adjusted roads vector saved to file:', roads_adj_fn)
+        gcp_adj = gpd.GeoDataFrame(geometry=[geom_crop], crs=crs_utm)
+        gcp_adj.to_file(gcp_adj_fn)
+        print('Adjusted gcp vector saved to file:', gcp_adj_fn)
     else:
-        print('Adjusted roads vector already exist in file, skipping.')
+        print('Adjusted gcp vector already exist in file, skipping.')
 
     # Reference DEM: regrid to desired CRS and crop
     refdem_adj_fn = os.path.join(out_dir, f"refdem_{crs_utm.replace(':', '')}.tif")
@@ -108,7 +108,7 @@ def preprocess_multispec_refdem_roads(multispec_dir, refdem_fn, roads_fn, roads_
     else:
         print('Adjusted reference DEM already exists in file, skipping.')
 
-    return multispec_mosaic_fn, roads_adj_fn, refdem_adj_fn
+    return multispec_mosaic_fn, gcp_adj_fn, refdem_adj_fn
 
 
 def preprocess_point_clouds(pc_las_fn, ref_dem_fn, resolution, out_dir, plot_results=True):
@@ -139,7 +139,7 @@ def preprocess_point_clouds(pc_las_fn, ref_dem_fn, resolution, out_dir, plot_res
     json2_fn = os.path.join(out_dir, 'las2unaligned.json')
     pc_filtered_las_fn = os.path.join(out_dir, 'pc_merged_filtered.laz')
     pc_filtered_tif_fn = os.path.join(out_dir, 'pc_merged_filtered.tif')
-    fig_fn = os.path.join(out_dir, 'pc_filtered.png')
+    fig_fn = os.path.join(out_dir, 'pc_merged_filtered.png')
 
     ### Rasterize initial point cloud for reference ###
     # Create PDAL pipeline JSON file
@@ -254,11 +254,11 @@ def preprocess_point_clouds(pc_las_fn, ref_dem_fn, resolution, out_dir, plot_res
     return pc_filtered_las_fn, pc_filtered_tif_fn
 
 
-def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, roads_buffer=3, ndvi_threshold=0.5, ndsi_threshold=0.1, plot_results=True):
+def construct_land_cover_masks(multispec_mosaic_fn, gcp_vector_fn, out_dir, gcp_buffer=3, ndvi_threshold=0.5, ndsi_threshold=0.1, plot_results=True):
     # Define output files
     trees_mask_fn = os.path.join(out_dir, 'trees_mask.tif')
     snow_mask_fn = os.path.join(out_dir, 'snow_mask.tif')
-    roads_mask_fn = os.path.join(out_dir, 'roads_mask.tif')
+    gcp_mask_fn = os.path.join(out_dir, 'gcp_mask.tif')
     ss_mask_fn = os.path.join(out_dir, 'stable_surfaces_mask.tif')
     fig_fn = os.path.join(out_dir, 'land_cover_masks.png')
 
@@ -318,26 +318,26 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     else:
         print('Snow mask exists in directory, skipping.')
 
-    # Construct roads mask
-    if not os.path.exists(roads_mask_fn):
-        print('Constructing roads mask...')
+    # Construct gcp mask
+    if not os.path.exists(gcp_mask_fn):
+        print('Constructing gcp mask...')
         if not mosaic:
             mosaic, crs = load_mosaic(multispec_mosaic_fn)
-        # Load roads vector file
-        roads_vector = gpd.read_file(roads_vector_fn) 
+        # Load gcp vector file
+        gcp_vector = gpd.read_file(gcp_vector_fn) 
         # Convert to mask
-        roads_mask = mosaic.blue.rio.clip(roads_vector.geometry.values, roads_vector.crs, drop=False)
-        roads_mask = xr.where(np.isnan(roads_mask), 0, 1)
+        gcp_mask = mosaic.blue.rio.clip(gcp_vector.geometry.values, gcp_vector.crs, drop=False)
+        gcp_mask = xr.where(np.isnan(gcp_mask), 0, 1)
         # Save to file
-        roads_mask = xr.where(np.isnan(mosaic.blue), -9999, roads_mask)
-        roads_mask = roads_mask.assign_attrs({'Description': 'Roads mask constructed by buffering, rasterizing, and interpolating the geospatial roads file to the 4-band image grid.',
+        gcp_mask = xr.where(np.isnan(mosaic.blue), -9999, gcp_mask)
+        gcp_mask = gcp_mask.assign_attrs({'Description': 'GCP mask constructed by buffering, rasterizing, and interpolating the geospatial GCP file to the 4-band image grid.',
                                             '_FillValue': -9999,
-                                            'buffer_m': roads_buffer})
-        roads_mask.rio.write_crs(crs, inplace=True)
-        roads_mask.rio.to_raster(roads_mask_fn, dtype='int16')
-        print('Roads mask saved to file:', roads_mask_fn)
+                                            'buffer_m': gcp_buffer})
+        gcp_mask.rio.write_crs(crs, inplace=True)
+        gcp_mask.rio.to_raster(gcp_mask_fn, dtype='int16')
+        print('GCP mask saved to file:', gcp_mask_fn)
     else: 
-        print('Roads mask exists in directory, skipping.')
+        print('GCP mask exists in directory, skipping.')
 
     # Construct stable surfaces (snow-free and tree-free) mask
     if not os.path.exists(ss_mask_fn):
@@ -367,7 +367,7 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
         # Load masks
         trees_mask = rxr.open_rasterio(trees_mask_fn).squeeze()
         snow_mask = rxr.open_rasterio(snow_mask_fn).squeeze()
-        roads_mask = rxr.open_rasterio(roads_mask_fn).squeeze()
+        gcp_mask = rxr.open_rasterio(gcp_mask_fn).squeeze()
         ss_mask = rxr.open_rasterio(ss_mask_fn).squeeze()
         # Define land cover colors
         # Plot
@@ -382,8 +382,8 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
         colors_dict = {'trees': '#006d2c', 
                        'snow': '#4292c6', 
                        'stable_surfaces': '#bdbdbd', 
-                       'roads': '#662506'}
-        for mask, label in zip([trees_mask, snow_mask, ss_mask, roads_mask], list(colors_dict.keys())):
+                       'gcp': '#662506'}
+        for mask, label in zip([trees_mask, snow_mask, ss_mask, gcp_mask], list(colors_dict.keys())):
             cmap = matplotlib.colors.ListedColormap([(0,0,0,0), matplotlib.colors.to_rgb(colors_dict[label])])
             ax[1].imshow(mask, cmap=cmap, clim=(0,1),
                         extent=(np.min(mask.x)/1e3, np.max(mask.x)/1e3, np.min(mask.y)/1e3, np.max(mask.y)/1e3))
@@ -401,124 +401,112 @@ def construct_land_cover_masks(multispec_mosaic_fn, roads_vector_fn, out_dir, ro
     elif plot_results:
         print('Masks figure exists in directory, skipping plotting.')
 
-    return multispec_mosaic_fn, trees_mask_fn, snow_mask_fn, roads_mask_fn, ss_mask_fn
+    return multispec_mosaic_fn, trees_mask_fn, snow_mask_fn, gcp_mask_fn, ss_mask_fn
 
     
-def correct_coregister_difference(dem_fn, refdem_fn, ss_mask_fn, roads_mask_fn, trees_mask_fn, out_dir, plot_results=True):
+def correct_coregister_difference(dem_fn, ref_dem_fn, ss_mask_fn, trees_mask_fn, gcp_mask_fn, gcp_elev, out_dir, mask_trees=False, plot_results=True):
     # Define output files
     final_dem_fn = os.path.join(out_dir, 'final_dem.tif')
     final_ddem_fn = os.path.join(out_dir, 'final_ddem.tif')
-    fig_fn = os.path.join(out_dir, 'correct_coreg_diff_results.png')
+    deramp_meta_fn = os.path.join(out_dir, 'fit_deramp.json')
+    icp_meta_fn = os.path.join(out_dir, 'fit_icp.json')
+    vert_meta_fn = os.path.join(out_dir, 'fit_vertical_adjustment.json')
 
-    if (not os.path.exists(final_dem_fn)) | (not os.path.exists(final_ddem_fn)):
-        print('Loading input files...')
-        dem = xdem.DEM(dem_fn)
-        refdem = xdem.DEM(refdem_fn).reproject(dem)
-        ss_mask = gu.Raster(ss_mask_fn).reproject(dem)
-        ss_mask = (ss_mask==1)
-        roads_mask = gu.Raster(roads_mask_fn).reproject(dem)
-        roads_mask = (roads_mask==1)
+    print('Loading input files...')
+    dem = xdem.DEM(dem_fn)
+    refdem = xdem.DEM(ref_dem_fn).reproject(dem)
+    ss_mask = gu.Raster(ss_mask_fn, load_data=True).reproject(dem)
+    ss_mask = (ss_mask == 1)
+    trees_mask = gu.Raster(trees_mask_fn, load_data=True).reproject(dem)
+    trees_mask = (trees_mask==1)
+    gcp_mask = gu.Raster(gcp_mask_fn, load_data=True).reproject(dem)
+    gcp_mask = (gcp_mask==1)
 
-        print('Calculating dDEM before adjustments...')
-        ddem_before = dem - refdem
-        ddem_before_roads = ddem_before[roads_mask]
-        ddem_before_roads_med = np.nanmedian(ddem_before_roads.data)
-        ddem_before_roads_nmad = xdem.spatialstats.nmad(ddem_before_roads)
+    if mask_trees:
+        print('Masking trees...')
+        dem.set_mask(trees_mask)
 
-        def correct_dem(refdem, dem, ss_mask):
-            # ICP
-            print('ICP')
-            icp = xdem.coreg.ICP().fit(refdem, dem, ss_mask)
-            dem_icp = icp.apply(dem)
-            # Deramp
-            print('Deramp')
-            deramp = xdem.coreg.Deramp().fit(refdem, dem_icp, ss_mask)
-            dem_icp_deramp = deramp.apply(dem_icp)
-            print(deramp.meta)
-            # Nuth and Kaab coregistration
-            print('Nuth & Kaab coregistration')
-            nk = xdem.coreg.NuthKaab().fit(refdem, dem_icp_deramp, ss_mask)
-            dem_icp_deramp_nk = nk.apply(dem_icp_deramp)
-            print(nk.meta)
-            return dem_icp_deramp_nk
-
-        print('Correcting DEM...')
-        print('Iteration 1/2....')
-        dem_corr = correct_dem(refdem, dem, ss_mask)
-        print('Iteration 2/2....')
-        dem_corr_corr = correct_dem(refdem, dem_corr, ss_mask)
-
-        print('Masking trees in corrected DEM...')
-        trees_mask = gu.Raster(trees_mask_fn, load_data=True).reproject(dem_corr_corr)
-        trees_mask = (trees_mask==1)
-        # Apply the mask to the DEM without losing the original mask
-        dem_corr_corr.data = np.ma.array(dem_corr_corr.data, 
-                                         mask=(dem_corr_corr.data.mask | trees_mask))
-
-        print('Calculating difference after bias correction...')
-        ddem_after = dem_corr_corr - refdem
-        ddem_after_roads = ddem_after[roads_mask]
-        ddem_after_roads_med = np.nanmedian(ddem_after_roads.data)
-        ddem_after_roads_nmad = xdem.spatialstats.nmad(ddem_after_roads)
-
-        print('Applying vertical correction using median dDEM value at roads...')
-        ddem_after = ddem_after - ddem_after_roads_med
-        final_dem = dem_corr_corr - ddem_after_roads_med
-        ddem_after_roads_med = 0
-
-        # Save results to file
-        final_dem.save(final_dem_fn)
-        print('Final DEM saved to file:', final_dem_fn)
-        ddem_after.save(final_ddem_fn)
-        print('Final dDEM saved to file:', final_ddem_fn)
-    
-    else:
-        print('Final DEM and dDEM already exist, skipping.')
-        return final_dem_fn, final_ddem_fn
-
-    if plot_results:
-        print('Plotting results...')
-        vmin, vmax = -10, 10
-        fig, ax = plt.subplots(2, 2, figsize=(10,8), gridspec_kw=dict(height_ratios=[2,1]))
-        ax = ax.flatten()
-        bins = np.linspace(vmin, vmax, 100)
-        ss_color = 'm'
-        for i, (ddem, ddem_roads, ddem_roads_med, ddem_roads_nmad) in enumerate(zip([ddem_before, ddem_after], 
-                                                                                    [ddem_before_roads, ddem_after_roads],
-                                                                                    [ddem_before_roads_med, ddem_after_roads_med], 
-                                                                                    [ddem_before_roads_nmad, ddem_after_roads_nmad])):
-            # Map
-            ddem.plot(ax=ax[i], cmap='coolwarm_r', vmin=vmin, vmax=vmax)
-            ax[i].set_xticks(ax[i].get_xticks())
-            ax[i].set_xticklabels(np.divide(ax[i].get_xticks(), 1e3).astype(str))
-            ax[i].set_yticks(ax[i].get_yticks())
-            ax[i].set_yticklabels(np.divide(ax[i].get_yticks(), 1e3).astype(str))
-            ax[i].set_xlabel('Easting [km]')
-            # Histogram
-            ax[i+2].hist(ddem.data.ravel(), bins=bins, color='k', alpha=0.8, label='All surfaces')
-            ax2 = ax[i+2].twinx()
-            hist = ax2.hist(ddem_roads.data.ravel(), bins=bins, color=ss_color, alpha=0.8, label='Roads')
-            ax2.spines['right'].set_color(ss_color)
-            ax2.yaxis.label.set_color(ss_color)
-            ax2.tick_params(colors=ss_color, which='both')
-            ax2.set_ylim(0, np.nanmax(hist[0])*1.4)
-            ax[i+2].set_xlim(vmin, vmax)
-            handles1, labels1 = ax[i+2].get_legend_handles_labels()
-            handles2, labels2 = ax2.get_legend_handles_labels()
-            handles, labels = handles1+handles2, labels1+labels2
-            ax[i+2].legend(handles, labels, loc='best')
-            ax[i+2].set_title(f'SS median = {np.round(ddem_roads_med, 3)} m\nSS MAD = {np.round(ddem_roads_nmad, 3)} m')
-        # Add some labels
-        ax[0].set_ylabel('Northing [km]')
-        ax[0].set_title('dDEM')
-        ax[1].set_title('dDEM adjusted')
-        ax[2].set_ylabel('Counts')
-        ax2.set_ylabel('Counts', color=ss_color)
+    def plot_ddem(ddem, mask):
+        vmin, vmax = -5, 5
+        fig, ax = plt.subplots(1, 2, figsize=(10,5))
+        ddem.plot(cmap='coolwarm_r', vmin=vmin, vmax=vmax, ax=ax[0])
+        ax[1].hist(ddem.data.ravel(), bins=np.linspace(vmin, vmax, 100), color='gray', alpha=0.8)
+        ax1 = ax[1].twinx()
+        ddem_ss = ddem[mask]
+        hist = ax1.hist(ddem_ss.data.ravel(), bins=np.linspace(vmin, vmax, 100), color='m', alpha=0.8)
+        ax1.set_ylim(0, np.nanmax(hist[0])*1.4)
+        ax1.set_xlim(vmin, vmax)
         fig.tight_layout()
-        # Save figure
-        fig.savefig(fig_fn, dpi=300, bbox_inches='tight')
-        print('Figure saved to file:', fig_fn)
-        plt.close()
+        plt.show()
+        return
+    
+    def save_fit_to_json(meta, meta_fn):
+        meta_str = {key: str(value) for key, value in meta.items()}
+        with open(meta_fn, "w") as out_file:
+            json.dump(meta_str, out_file)
+            print('Fit metadata saved to file:', deramp_meta_fn)
+        return
+
+    # Calculate dDEM before
+    if plot_results:
+        print('Calculating difference before any corrections...')
+        ddem_before = dem - refdem
+        plot_ddem(ddem_before, gcp_mask)
+
+    # Deramp
+    print('Deramping...')
+    deramp = xdem.coreg.Deramp().fit(refdem, dem)
+    dem_deramp = deramp.apply(dem)
+    # Save fit to file
+    save_fit_to_json(deramp.meta, deramp_meta_fn)
+    # re-calculate dDEM
+    ddem_deramp = dem_deramp - refdem
+    # Plot new dDEM
+    if plot_results:
+        plot_ddem(ddem_deramp, gcp_mask)
+
+    # Mask very high dDEM values
+    print('Masking pixels where abs(dDEM) >= 20 m')
+    ddem_deramp.data[np.abs(ddem_deramp.data) >= 20] = np.nan
+    dem_deramp.data[np.abs(ddem_deramp.data) >= 20] = np.nan
+
+    # ICP
+    print('ICP...')
+    icp = xdem.coreg.ICP().fit(refdem, dem_deramp)
+    dem_deramp_icp = icp.apply(dem_deramp)
+    # Save fit to file
+    save_fit_to_json(icp.meta, icp_meta_fn)
+    # re-calculate dDEM
+    ddem_deramp_icp = dem_deramp_icp - refdem
+    # Plot new dDEM
+    if plot_results:
+        plot_ddem(ddem_deramp_icp, gcp_mask)
+
+    # Remove median difference over gcp
+    ddem_deramp_icp_gcp = ddem_deramp_icp.copy()
+    ddem_deramp_icp_gcp.set_mask(~gcp_mask)
+    ddem_deramp_icp_gcp_med = np.nanmedian(ddem_deramp_icp_gcp)
+    ddem_deramp_icp_gcp_nmad = xdem.spatialstats.nmad(ddem_deramp_icp_gcp)
+    print(f"GCP Median = {np.round(ddem_deramp_icp_gcp_med, 3)}")
+    print(f"GCP NMAD = {np.round(ddem_deramp_icp_gcp_nmad, 3)}")
+    vert_adjust = ddem_deramp_icp_gcp_med - gcp_elev
+    print(f'Vertical adjustment = {vert_adjust}')
+    # save json of verticaladjustment
+    vert_meta = {'dDEM_GCP_vert_adj': str(vert_adjust),
+                 'dDEM_GCP_NMAD': str(ddem_deramp_icp_gcp_nmad)}
+    save_fit_to_json(vert_meta, vert_meta_fn)
+    # Calculate final DEM and dDEM
+    final_dem = dem_deramp_icp - vert_adjust
+    final_ddem = ddem_deramp_icp - vert_adjust
+    # Plot dDEM
+    if plot_results:
+        plot_ddem(final_ddem, gcp_mask)
+
+    # Save results to file
+    final_dem.save(final_dem_fn)
+    print('DEM saved to file:', final_dem_fn)
+    final_ddem.save(final_ddem_fn)
+    print('dDEM saved to file:', final_ddem_fn)
 
     return final_dem_fn, final_ddem_fn
 
@@ -604,7 +592,7 @@ def plot_dem_ddem(dem_fn, ddem_fn, ss_mask_fn, out_fn, vmin=-5, vmax=5):
     return
 
 
-def analyze_ddem(ddem_fn, refdem_fn, roads_mask_fn, snow_mask_fn, ss_mask_fn, trees_mask_fn, out_dir, vmin=-5, vmax=5):
+def analyze_ddem(ddem_fn, refdem_fn, gcp_mask_fn, snow_mask_fn, ss_mask_fn, trees_mask_fn, out_dir, vmin=-5, vmax=5):
     # Define output files
     land_cover_fig = os.path.join(out_dir, 'ddem_vs_land_cover_types.png')
     terrain_fig = os.path.join(out_dir, 'ddem_vs_terrain_parameters.png')
@@ -620,8 +608,8 @@ def analyze_ddem(ddem_fn, refdem_fn, roads_mask_fn, snow_mask_fn, ss_mask_fn, tr
     if not os.path.exists(land_cover_fig):
         print('Plotting dDEM vs. land cover types...')
         # Load land cover masks
-        roads_mask = gu.Raster(roads_mask_fn, load_data=True)
-        roads_mask = roads_mask.reproject(ddem)
+        gcp_mask = gu.Raster(gcp_mask_fn, load_data=True)
+        gcp_mask = gcp_mask.reproject(ddem)
         snow_mask = gu.Raster(snow_mask_fn, load_data=True)
         snow_mask = snow_mask.reproject(ddem)
         ss_mask = gu.Raster(ss_mask_fn, load_data=True)
@@ -630,18 +618,18 @@ def analyze_ddem(ddem_fn, refdem_fn, roads_mask_fn, snow_mask_fn, ss_mask_fn, tr
         trees_mask = trees_mask.reproject(ddem)
         # Create dataframe
         df = pd.DataFrame({'dDEM': ddem.data.ravel(),
-                           'roads_mask': roads_mask.data.ravel(),
+                           'gcp_mask': gcp_mask.data.ravel(),
                            'snow_mask': snow_mask.data.ravel(),
                            'ss_mask': ss_mask.data.ravel(),
                            'trees_mask': trees_mask.data.ravel()})
         df.dropna(inplace=True)
         # Plot histogram
         bins = np.linspace(vmin, vmax, 200)
-        cols = ['snow_mask', 'ss_mask', 'trees_mask', 'roads_mask'] 
+        cols = ['snow_mask', 'ss_mask', 'trees_mask', 'gcp_mask'] 
         colors = [(55/255, 126/255, 184/255, 1), # snow
                 (153/255, 153/255, 153/255, 1), # stable surfaces
                 (77/255, 175/255, 74/255, 1), # trees
-                (166/255, 86/255, 40/255, 1)] # roads
+                (166/255, 86/255, 40/255, 1)] # GCP
         fig, ax = plt.subplots(2, 2, figsize=(10,5))
         ax = ax.flatten()
         for i, (col, color) in enumerate(zip(cols, colors)):
@@ -787,25 +775,25 @@ def deramp(ref_dem_fn, tba_dem_fn, tba_pc_fn, out_dir, vmin=-10, vmax=10, plot_r
     return pc_deramped_fn
 
 
-def align_transform_pc(asp_dir, tba_pc_fn, ref_dem_fn, roads_mask_fn, out_res, out_align_dir, out_transform_dir):
-    # Clip reference DEM to roads mask
-    ref_dem_clip_fn = os.path.join(out_align_dir, 'reference_dem_roads.tif')
+def align_transform_pc(asp_dir, tba_pc_fn, ref_dem_fn, gcp_mask_fn, out_res, out_align_dir, out_transform_dir):
+    # Clip reference DEM to gcp mask
+    ref_dem_clip_fn = os.path.join(out_align_dir, 'reference_dem_gcp.tif')
     if not os.path.exists(ref_dem_clip_fn):
         ref_dem = rxr.open_rasterio(ref_dem_fn).squeeze()
-        roads_mask = rxr.open_rasterio(roads_mask_fn).squeeze()
-        roads_mask = roads_mask.rio.reproject_match(ref_dem)
+        gcp_mask = rxr.open_rasterio(gcp_mask_fn).squeeze()
+        gcp_mask = gcp_mask.rio.reproject_match(ref_dem)
         with xr.set_options(keep_attrs=True):
-            ref_dem_clip = xr.where(roads_mask==1, ref_dem, ref_dem.attrs['_FillValue'])
+            ref_dem_clip = xr.where(gcp_mask==1, ref_dem, ref_dem.attrs['_FillValue'])
             ref_dem_clip.rio.to_raster(ref_dem_clip_fn)
-        print('Reference DEM clipped to roads saved to file:', ref_dem_clip_fn)
+        print('Reference DEM clipped to GCP saved to file:', ref_dem_clip_fn)
     else:
-        print('Reference DEM clipped to roads already exists, skipping.')
+        print('Reference DEM clipped to GCP already exists, skipping.')
 
     # Align point clouds
     pc_align_prefix = os.path.join(out_align_dir,'pc-align')
     init_transform = f"{pc_align_prefix}-transform.txt"
     if not os.path.exists(init_transform):
-        print('Beginning pc_align over roads...')
+        print('Beginning pc_align over GCP...')
         cmd = [os.path.join(asp_dir, 'pc_align'), '--max-displacement', '5', '--highest-accuracy',
                ref_dem_clip_fn, tba_pc_fn, '-o', pc_align_prefix]
         output = subprocess.run(cmd, shell=False, capture_output=True)
@@ -840,7 +828,7 @@ def align_transform_pc(asp_dir, tba_pc_fn, ref_dem_fn, roads_mask_fn, out_res, o
 
     return final_tif_fn
 
-def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, roads_mask_fn, out_res, out_dir, vmin=-5, vmax=5, plot_results=True):
+def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, gcp_mask_fn, out_res, out_dir, vmin=-5, vmax=5, plot_results=True):
 
     # Define output files
     out_dem_fn = os.path.join(out_dir, 'final_DEM.tif')
@@ -858,19 +846,19 @@ def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, roads_mask_fn, out_re
     ref_dem = ref_dem.reproject(res=out_res)
     dem = xdem.DEM(tba_dem_fn)
     ss_mask = gu.Raster(ss_mask_fn, load_data=True)
-    roads_mask = gu.Raster(roads_mask_fn, load_data=True)
+    gcp_mask = gu.Raster(gcp_mask_fn, load_data=True)
     # Reproject DEM and ss_mask to reference DEM
     dem = dem.reproject(ref_dem)
     ss_mask = ss_mask.reproject(ref_dem)
     ss_mask = (ss_mask==1)
-    roads_mask = roads_mask.reproject(ref_dem)
-    roads_mask = (roads_mask==1)
+    gcp_mask = gcp_mask.reproject(ref_dem)
+    gcp_mask = (gcp_mask==1)
 
     # Calculate dDEM and stable surface stats before adjustments
     print('Calculating dDEM before adjustments...')
     ddem_before = dem - ref_dem
-    ddem_before_roads = ddem_before[roads_mask]
-    ddem_before_roads_med, ddem_before_roads_nmad = np.median(ddem_before_roads), xdem.spatialstats.nmad(ddem_before_roads)
+    ddem_before_gcp = ddem_before[gcp_mask]
+    ddem_before_gcp_med, ddem_before_gcp_nmad = np.median(ddem_before_gcp), xdem.spatialstats.nmad(ddem_before_gcp)
 
     # Deramp
     print('Deramping using stable surfaces...')
@@ -886,16 +874,16 @@ def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, roads_mask_fn, out_re
     # Calculate differences after adjustments
     print('Calculating dDEM after adjustments...')
     ddem_after = dem_deramp_coreg - ref_dem
-    ddem_after_roads = ddem_after[roads_mask]
-    ddem_after_roads_med, ddem_after_roads_nmad = np.median(ddem_after_roads), xdem.spatialstats.nmad(ddem_after_roads)
+    ddem_after_gcp = ddem_after[gcp_mask]
+    ddem_after_gcp_med, ddem_after_gcp_nmad = np.median(ddem_after_gcp), xdem.spatialstats.nmad(ddem_after_gcp)
 
     # Subtract the median stable surfaces difference
-    print('Removing median dDEM value over roads...')
-    dem_deramp_coreg -= ddem_after_roads_med
-    ddem_after -= ddem_after_roads_med
+    print('Removing median dDEM value over GCP...')
+    dem_deramp_coreg -= ddem_after_gcp_med
+    ddem_after -= ddem_after_gcp_med
     # Re-calculate stable surface stats
-    ddem_after_roads = ddem_after[roads_mask]
-    ddem_after_roads_med, ddem_after_roads_nmad = np.median(ddem_after_roads), xdem.spatialstats.nmad(ddem_after_roads)
+    ddem_after_gcp = ddem_after[gcp_mask]
+    ddem_after_gcp_med, ddem_after_gcp_nmad = np.median(ddem_after_gcp), xdem.spatialstats.nmad(ddem_after_gcp)
 
     # Save final DEM and dDEM
     dem_deramp_coreg.save(out_dem_fn)
@@ -911,9 +899,9 @@ def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, roads_mask_fn, out_re
         bins = np.linspace(vmin, vmax, 100)
         ss_color = 'm'
         for i, (ddem, ddem_ss, ddem_ss_med, ddem_ss_nmad) in enumerate(zip([ddem_before, ddem_after], 
-                                                                        [ddem_before_roads, ddem_after_roads],
-                                                                        [ddem_before_roads_med, ddem_after_roads_med], 
-                                                                        [ddem_before_roads_nmad, ddem_after_roads_nmad])):
+                                                                        [ddem_before_gcp, ddem_after_gcp],
+                                                                        [ddem_before_gcp_med, ddem_after_gcp_med], 
+                                                                        [ddem_before_gcp_nmad, ddem_after_gcp_nmad])):
             # Map
             ddem.plot(ax=ax[i], cmap='coolwarm_r', vmin=vmin, vmax=vmax)
             ax[i].set_xticks(ax[i].get_xticks())
@@ -924,7 +912,7 @@ def raster_adjustments(ref_dem_fn, tba_dem_fn, ss_mask_fn, roads_mask_fn, out_re
             # Histogram
             ax[i+2].hist(ddem.data.ravel(), bins=bins, color='k', alpha=0.8, label='All surfaces')
             ax2 = ax[i+2].twinx()
-            hist = ax2.hist(ddem_ss.data.ravel(), bins=bins, color=ss_color, alpha=0.8, label='Roads')
+            hist = ax2.hist(ddem_ss.data.ravel(), bins=bins, color=ss_color, alpha=0.8, label='GCP')
             ax2.spines['right'].set_color(ss_color)
             ax2.yaxis.label.set_color(ss_color)
             ax2.tick_params(colors=ss_color, which='both')
